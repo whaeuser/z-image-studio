@@ -586,3 +586,39 @@ body { background-color: #f8f9fa; }
         .sticky-top {
             position: relative;
         }
+
+/* --- Image Editing: Init Image Drop Zone --- */
+.init-image-drop-zone {
+    cursor: pointer;
+    transition: border-color 0.2s, background-color 0.2s;
+    min-height: 80px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.init-image-drop-zone:hover {
+    border-color: var(--bs-primary) !important;
+    background-color: rgba(var(--bs-primary-rgb), 0.05);
+}
+
+.init-image-drop-zone.border-primary {
+    border-width: 2px !important;
+    border-style: dashed !important;
+    background-color: rgba(var(--bs-primary-rgb), 0.08);
+}
+
+/* --- Inpainting Canvas --- */
+#inpaintCanvasContainer canvas {
+    border: 1px solid var(--bs-border-color);
+    border-radius: 4px;
+}
+
+/* --- Mode Selector responsive --- */
+@media (max-width: 575px) {
+    .btn-group[role="group"] label.btn {
+        font-size: 0.75rem;
+        padding: 0.25rem 0.4rem;
+    }
+}

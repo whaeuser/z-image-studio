@@ -32,21 +32,26 @@ def add_generation(
     error_message: Optional[str] = None,
     precision: str = "q8",
     loras: List[Dict[str, Any]] = None, # List of {id: int, strength: float}
+    parent_id: Optional[int] = None,
+    mode: str = "txt2img",
+    strength: Optional[float] = None,
 ) -> int:
     """Insert a new generation record."""
     conn = _get_db_connection()
     cursor = conn.cursor()
-    
+
     cursor.execute('''
         INSERT INTO generations (
-            prompt, negative_prompt, steps, width, height, 
-            cfg_scale, seed, model, status, filename, 
-            error_message, generation_time, file_size_kb, created_at, precision
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            prompt, negative_prompt, steps, width, height,
+            cfg_scale, seed, model, status, filename,
+            error_message, generation_time, file_size_kb, created_at, precision,
+            parent_id, mode, strength
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         prompt, negative_prompt, steps, width, height,
         cfg_scale, seed, model, status, filename,
-        error_message, generation_time, file_size_kb, datetime.now(), precision
+        error_message, generation_time, file_size_kb, datetime.now(), precision,
+        parent_id, mode, strength
     ))
     
     new_id = cursor.lastrowid

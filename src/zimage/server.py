@@ -18,7 +18,7 @@ import random
 import json
 # Handle both module execution and direct execution scenarios
 try:
-    from .engine import generate_image, cleanup_memory
+    from .engine import generate_image, edit_image, upscale_generate, cleanup_memory
     from .worker import run_in_worker, run_in_worker_nowait
     from .hardware import get_available_models, MODEL_ID_MAP, normalize_precision
     from .logger import get_logger
@@ -36,7 +36,7 @@ except ImportError:
     # When running directly (e.g., uv run src/zimage/cli.py serve)
     # Add the zimage directory to sys.path and import directly
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from engine import generate_image, cleanup_memory
+    from engine import generate_image, edit_image, upscale_generate, cleanup_memory
     from worker import run_in_worker, run_in_worker_nowait
     from hardware import get_available_models, MODEL_ID_MAP, normalize_precision
     from logger import get_logger
@@ -204,6 +204,12 @@ class GenerateRequest(BaseModel):
     seed: int = None
     precision: str = "q8"
     loras: List[LoraInput] = []
+    # Image editing fields
+    mode: str = "txt2img"  # "txt2img" | "img2img" | "inpaint" | "upscale"
+    init_image: Optional[str] = None  # base64-encoded PNG or "ref:<filename>"
+    mask_image: Optional[str] = None  # base64-encoded PNG (white=edit, black=keep)
+    strength: float = Field(default=0.75, ge=0.0, le=1.0)
+    parent_id: Optional[int] = None  # source generation ID
 
 class GenerateResponse(BaseModel):
     id: int
@@ -216,6 +222,9 @@ class GenerateResponse(BaseModel):
     precision: str
     model_id: str
     loras: List[LoraInput] = []
+    mode: str = "txt2img"
+    parent_id: Optional[int] = None
+    strength: Optional[float] = None
 
 @app.get("/models")
 async def get_models():
@@ -382,14 +391,33 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 content={"error": "Invalid precision value."}
             )
 
+        # Validate mode
+        if req.mode not in ("txt2img", "img2img", "inpaint", "upscale"):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Invalid mode. Must be 'txt2img', 'img2img', 'inpaint', or 'upscale'."}
+            )
+
+        # Validate init_image / mask_image requirements
+        if req.mode in ("img2img", "inpaint") and not req.init_image:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "init_image is required for img2img and inpaint modes."}
+            )
+        if req.mode == "inpaint" and not req.mask_image:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "mask_image is required for inpaint mode."}
+            )
+
         # Validate dimensions (must be multiple of 16)
         width = req.width if req.width % 16 == 0 else (req.width // 16) * 16
         height = req.height if req.height % 16 == 0 else (req.height // 16) * 16
-        
+
         # Ensure minimums
         width = max(16, width)
         height = max(16, height)
-        
+
         # Validate LoRAs
         if len(req.loras) > 4:
              return JSONResponse(status_code=400, content={"error": "Maximum 4 LoRAs allowed."})
@@ -402,11 +430,11 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             lora_info = db.get_lora_by_filename(lora_input.filename)
             if not lora_info:
                  return JSONResponse(status_code=400, content={"error": f"LoRA '{lora_input.filename}' not found"})
-            
+
             lora_full_path = LORAS_DIR / lora_input.filename
             if not lora_full_path.exists():
                 return JSONResponse(status_code=500, content={"error": f"LoRA file missing on disk: {lora_input.filename}"})
-            
+
             resolved_loras.append((str(lora_full_path.resolve()), lora_input.strength))
             db_loras.append({"id": lora_info['id'], "strength": lora_input.strength})
 
@@ -416,20 +444,94 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             logger.info(f"Generated random seed: {req_seed}")
         else:
             req_seed = req.seed
-        
+
         start_time = time.time()
-        
-        # Run generation in the dedicated worker thread
-        image = await run_in_worker(
-            generate_image,
-            prompt=req.prompt,
-            steps=req.steps,
-            width=width,
-            height=height,
-            seed=req_seed,
-            precision=precision,
-            loras=resolved_loras
-        )
+
+        if req.mode in ("img2img", "inpaint"):
+            # Decode init_image
+            import base64
+            from io import BytesIO
+            from PIL import Image as PILImage
+
+            if req.init_image.startswith("ref:"):
+                ref_filename = req.init_image[4:]
+                if "/" in ref_filename or "\\" in ref_filename or ".." in ref_filename:
+                    return JSONResponse(status_code=400, content={"error": "Invalid init_image filename."})
+                init_path = OUTPUTS_DIR / ref_filename
+                if not init_path.exists():
+                    return JSONResponse(status_code=404, content={"error": f"Referenced image not found: {ref_filename}"})
+                init_pil = PILImage.open(init_path).convert("RGB")
+            else:
+                try:
+                    init_pil = PILImage.open(BytesIO(base64.b64decode(req.init_image))).convert("RGB")
+                except Exception:
+                    return JSONResponse(status_code=400, content={"error": "Invalid base64 init_image."})
+
+            # Decode mask_image (inpaint only)
+            mask_pil = None
+            if req.mode == "inpaint" and req.mask_image:
+                try:
+                    mask_pil = PILImage.open(BytesIO(base64.b64decode(req.mask_image))).convert("L")
+                except Exception:
+                    return JSONResponse(status_code=400, content={"error": "Invalid base64 mask_image."})
+
+            image = await run_in_worker(
+                edit_image,
+                prompt=req.prompt,
+                init_image=init_pil,
+                mask_image=mask_pil,
+                strength=req.strength,
+                steps=req.steps,
+                width=width,
+                height=height,
+                seed=req_seed,
+                precision=precision,
+                loras=resolved_loras,
+            )
+        elif req.mode == "upscale":
+            # Progressive 4-stage upscale generation
+            upscale_init_pil = None
+            if req.init_image:
+                import base64
+                from io import BytesIO
+                from PIL import Image as PILImage
+                if req.init_image.startswith("ref:"):
+                    ref_filename = req.init_image[4:]
+                    if "/" in ref_filename or "\\" in ref_filename or ".." in ref_filename:
+                        return JSONResponse(status_code=400, content={"error": "Invalid init_image filename."})
+                    init_path = OUTPUTS_DIR / ref_filename
+                    if not init_path.exists():
+                        return JSONResponse(status_code=404, content={"error": f"Referenced image not found: {ref_filename}"})
+                    upscale_init_pil = PILImage.open(init_path).convert("RGB")
+                else:
+                    try:
+                        upscale_init_pil = PILImage.open(BytesIO(base64.b64decode(req.init_image))).convert("RGB")
+                    except Exception:
+                        return JSONResponse(status_code=400, content={"error": "Invalid base64 init_image."})
+
+            image = await run_in_worker(
+                upscale_generate,
+                prompt=req.prompt,
+                steps=req.steps,
+                width=width,
+                height=height,
+                seed=req_seed,
+                precision=precision,
+                loras=resolved_loras,
+                init_image=upscale_init_pil,
+            )
+        else:
+            # Standard text-to-image generation
+            image = await run_in_worker(
+                generate_image,
+                prompt=req.prompt,
+                steps=req.steps,
+                width=width,
+                height=height,
+                seed=req_seed,
+                precision=precision,
+                loras=resolved_loras,
+            )
 
         # Save file
         output_path = save_image(image, req.prompt, outputs_dir=OUTPUTS_DIR)
@@ -455,12 +557,15 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             seed=req_seed,
             precision=precision,
             loras=db_loras,
+            parent_id=req.parent_id if req.mode != "txt2img" else None,
+            mode=req.mode,
+            strength=req.strength if req.mode in ("img2img", "inpaint") else None,
         )
         new_id = new_id or -1
 
         # Schedule cleanup to run AFTER the response is sent
         background_tasks.add_task(run_in_worker_nowait, cleanup_memory)
-        
+
         return {
             "id": new_id,
             "image_url": f"/outputs/{quote(filename, safe='')}",
@@ -471,7 +576,10 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             "seed": req_seed,
             "precision": precision,
             "model_id": model_id,
-            "loras": req.loras
+            "loras": req.loras,
+            "mode": req.mode,
+            "parent_id": req.parent_id if req.mode != "txt2img" else None,
+            "strength": req.strength if req.mode in ("img2img", "inpaint") else None,
         }
     except Exception as e:
         logger.error(f"Error generating image: {e}")
@@ -671,7 +779,7 @@ async def _process_mcp_streamable_request(
             tools = [
                 {
                     "name": "generate",
-                    "description": "Generate an image from a text prompt",
+                    "description": "Generate or edit an image. Supports txt2img, img2img, and inpainting modes.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -680,7 +788,11 @@ async def _process_mcp_streamable_request(
                             "width": {"type": "integer", "default": 1280},
                             "height": {"type": "integer", "default": 720},
                             "seed": {"type": ["integer", "null"], "default": None},
-                            "precision": {"type": "string", "default": "q8", "enum": ["full", "q8", "q4"]}
+                            "precision": {"type": "string", "default": "q8", "enum": ["full", "q8", "q4"]},
+                            "mode": {"type": "string", "default": "txt2img", "enum": ["txt2img", "img2img", "inpaint", "upscale"]},
+                            "init_image": {"type": ["string", "null"], "default": None, "description": "Base64 PNG or ref:<filename> for img2img/inpaint"},
+                            "mask_image": {"type": ["string", "null"], "default": None, "description": "Base64 PNG mask for inpainting (white=edit, black=keep)"},
+                            "strength": {"type": "number", "default": 0.75, "minimum": 0.0, "maximum": 1.0}
                         },
                         "required": ["prompt"]
                     }
@@ -827,6 +939,10 @@ async def _handle_generate_tool_streamable(
         height = arguments.get("height", 720)
         seed = arguments.get("seed")
         precision = arguments.get("precision", "q8")
+        gen_mode = arguments.get("mode", "txt2img")
+        gen_init_image = arguments.get("init_image")
+        gen_mask_image = arguments.get("mask_image")
+        gen_strength = arguments.get("strength", 0.75)
 
         result = await _generate_impl(
             prompt=prompt,
@@ -837,6 +953,10 @@ async def _handle_generate_tool_streamable(
             precision=precision,
             transport="streamable_http",
             ctx=ctx,
+            mode=gen_mode,
+            init_image=gen_init_image,
+            mask_image=gen_mask_image,
+            strength=gen_strength,
         )
 
         content = []

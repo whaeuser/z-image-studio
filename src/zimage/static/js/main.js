@@ -162,6 +162,42 @@
         const promptInput = document.getElementById('prompt');
         const widthInput = document.getElementById('width');
         const heightInput = document.getElementById('height');
+        const resolutionPreset = document.getElementById('resolutionPreset');
+        const customResolutionRow = document.getElementById('customResolutionRow');
+
+        /** Sync the preset dropdown to match the current width/height inputs. */
+        function _syncPresetFromInputs() {
+            if (!resolutionPreset) return;
+            const key = `${widthInput.value}x${heightInput.value}`;
+            const match = [...resolutionPreset.options].find(o => o.value === key);
+            if (match) {
+                resolutionPreset.value = key;
+                if (customResolutionRow) customResolutionRow.classList.add('d-none');
+            } else {
+                resolutionPreset.value = 'custom';
+                if (customResolutionRow) customResolutionRow.classList.remove('d-none');
+            }
+        }
+
+        /** Apply a resolution preset to width/height inputs. */
+        function _applyResolutionPreset(value) {
+            if (value === 'custom') {
+                if (customResolutionRow) customResolutionRow.classList.remove('d-none');
+                return;
+            }
+            if (customResolutionRow) customResolutionRow.classList.add('d-none');
+            const [w, h] = value.split('x').map(Number);
+            // Set both values first, then dispatch events to avoid
+            // _syncPresetFromInputs seeing a half-updated state.
+            if (widthInput) widthInput.value = w;
+            if (heightInput) heightInput.value = h;
+            if (widthInput) widthInput.dispatchEvent(new Event('change'));
+            if (heightInput) heightInput.dispatchEvent(new Event('change'));
+        }
+
+        window._onResolutionChange = (value) => {
+            _applyResolutionPreset(value);
+        };
 
         // --- State Variables ---
         let isDirty = false;
@@ -174,6 +210,11 @@
         let pendingLora = null;
         let currentImageFilename = null;
         let currentImageUrl = null;
+        let currentInitImageRef = null;   // "ref:<filename>" for existing outputs
+        let currentInitImageBase64 = null; // base64-encoded init image data
+        let currentMaskBase64 = null;      // base64-encoded mask data
+        let currentParentId = null;        // parent generation ID for edit lineage
+        let maskEditorInstance = null;     // MaskEditor instance
         let shareBtnMobile, copyBtnMobile; // Declare mobile buttons early to avoid hoisting issues
 
         // --- Search state management (matches API parameter names) ---
@@ -635,8 +676,8 @@
             if (stepsVal) stepsVal.textContent = savedSteps;
         }
 
-        if (localStorage.getItem('zimage_width') && widthInput) widthInput.value = localStorage.getItem('zimage_width');
-        if (localStorage.getItem('zimage_height') && heightInput) heightInput.value = localStorage.getItem('zimage_height');
+        // Width/height are determined by the resolution preset dropdown
+        _syncPresetFromInputs();
 
         // Load saved LoRAs
         try {
@@ -1037,8 +1078,8 @@
             val = Math.round(val / 16) * 16;
             if (val < 16) val = 16;
             e.target.value = val;
-            localStorage.setItem(`zimage_width`, val);
             isDirty = true;
+            _syncPresetFromInputs();
         });
         if (heightInput) heightInput.addEventListener('change', (e) => {
             let val = parseInt(e.target.value);
@@ -1046,8 +1087,8 @@
             val = Math.round(val / 16) * 16;
             if (val < 16) val = 16;
             e.target.value = val;
-            localStorage.setItem(`zimage_height`, val);
             isDirty = true;
+            _syncPresetFromInputs();
         });
 
         // --- Search Functions ---
@@ -1483,9 +1524,21 @@ async function deleteHistoryItem(itemId) {
                             <small class="text-muted" style="line-height: 0.9rem">${date}</small>
                             <small class="text-muted" style="line-height: 0.9rem">${formatValueWithOneDecimal(item.generation_time)}s · ${item.precision} · ${item.steps} steps</small>
                         </div>
-                        <button class="btn btn-sm btn-outline-secondary ms-auto delete-history-item" data-id="${item.id}" title="${translations[currentLanguage].delete_btn_tooltip}" data-bs-toggle="tooltip" data-bs-placement="top">
-                            <i class="bi bi-trash"></i>
-                        </button>
+                        <div class="d-flex flex-column gap-1 ms-auto flex-shrink-0">
+                            <div class="dropdown">
+                                <button class="btn btn-sm btn-outline-primary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" title="${translations[currentLanguage].edit_btn || 'Edit'}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    <li><button type="button" class="dropdown-item send-to-img2img"><i class="bi bi-image me-2"></i>${translations[currentLanguage].send_to_img2img || 'Send to img2img'}</button></li>
+                                    <li><button type="button" class="dropdown-item send-to-inpaint"><i class="bi bi-brush me-2"></i>${translations[currentLanguage].send_to_inpaint || 'Send to Inpaint'}</button></li>
+                                    <li><button type="button" class="dropdown-item send-to-upscale"><i class="bi bi-arrows-fullscreen me-2"></i>${translations[currentLanguage].send_to_upscale || 'Send to Upscale'}</button></li>
+                                </ul>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary delete-history-item" data-id="${item.id}" title="${translations[currentLanguage].delete_btn_tooltip}" data-bs-toggle="tooltip" data-bs-placement="top">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
                     </a>
                 `;
 
@@ -1496,11 +1549,25 @@ async function deleteHistoryItem(itemId) {
                     const el = temp.firstElementChild;
                     
                     el.onclick = (e) => {
-                        if (!e.target.closest('.delete-history-item')) {
+                        if (!e.target.closest('.delete-history-item') && !e.target.closest('.dropdown')) {
                             e.preventDefault();
                             loadFromHistory(item);
                         }
                     };
+
+                    // Send-to mode dropdown handlers
+                    const sendToImg2img = el.querySelector('.send-to-img2img');
+                    if (sendToImg2img) {
+                        sendToImg2img.onclick = (e) => { e.stopPropagation(); e.preventDefault(); enterEditMode(item); };
+                    }
+                    const sendToInpaint = el.querySelector('.send-to-inpaint');
+                    if (sendToInpaint) {
+                        sendToInpaint.onclick = (e) => { e.stopPropagation(); e.preventDefault(); enterInpaintMode(item); };
+                    }
+                    const sendToUpscale = el.querySelector('.send-to-upscale');
+                    if (sendToUpscale) {
+                        sendToUpscale.onclick = (e) => { e.stopPropagation(); e.preventDefault(); enterUpscaleMode(item); };
+                    }
 
                     const delBtn = el.querySelector('.delete-history-item');
                     delBtn.onclick = async (e) => {
@@ -1862,7 +1929,8 @@ async function deleteHistoryItem(itemId) {
             }
             if (widthInput) widthInput.value = item.width;
             if (heightInput) heightInput.value = item.height;
-            
+            _syncPresetFromInputs();
+
             // Restore LoRAs
             activeLoras = []; 
             if (item.loras && Array.isArray(item.loras)) {
@@ -1895,8 +1963,7 @@ async function deleteHistoryItem(itemId) {
             // Sync LocalStorage
             localStorage.setItem('zimage_prompt', item.prompt);
             localStorage.setItem('zimage_steps', item.steps);
-            localStorage.setItem('zimage_width', item.width);
-            localStorage.setItem('zimage_height', item.height);
+            // Width/height are synced via resolution preset
 
             // Preview
             const imageUrl = `/outputs/${item.filename}`;
@@ -2026,6 +2093,10 @@ async function deleteHistoryItem(itemId) {
             allShareButtons.forEach(btn => btn.disabled = !hasImage);
             allCopyButtons.forEach(btn => btn.disabled = !hasImage);
             allDownloadButtons.forEach(btn => btn.disabled = !hasImage);
+
+            // Edit button
+            const editBtnEl = document.getElementById('editBtn');
+            if (editBtnEl) editBtnEl.disabled = !hasImage;
             
             // Update tooltips based on context
             if (!hasImage) {
@@ -2241,7 +2312,299 @@ async function deleteHistoryItem(itemId) {
         
         // Initialize share button state
         updateShareButtonState();
-        
+
+        // --- Mode Switching & Image Editing UI ---
+        const modeRadios = document.querySelectorAll('input[name="genMode"]');
+        const initImageSection = document.getElementById('initImageSection');
+        const strengthSection = document.getElementById('strengthSection');
+        const strengthInput = document.getElementById('strength');
+        const strengthValEl = document.getElementById('strengthVal');
+        const initImageDropZone = document.getElementById('initImageDropZone');
+        const initImageInput = document.getElementById('initImageInput');
+        const initImagePreview = document.getElementById('initImagePreview');
+        const initImagePlaceholder = document.getElementById('initImagePlaceholder');
+        const clearInitImageBtn = document.getElementById('clearInitImageBtn');
+        const paintMaskBtn = document.getElementById('paintMaskBtn');
+        const maskAppliedBadge = document.getElementById('maskAppliedBadge');
+        const editBtn = document.getElementById('editBtn');
+
+        function getSelectedMode() {
+            const checked = document.querySelector('input[name="genMode"]:checked');
+            return checked ? checked.value : 'txt2img';
+        }
+
+        function updateModeUI() {
+            const mode = getSelectedMode();
+            const needsInitImage = mode === 'img2img' || mode === 'inpaint';
+            const showInitImage = needsInitImage || mode === 'upscale';
+            if (initImageSection) initImageSection.classList.toggle('d-none', !showInitImage);
+            if (strengthSection) strengthSection.classList.toggle('d-none', !needsInitImage);
+            if (paintMaskBtn) paintMaskBtn.classList.toggle('d-none', mode !== 'inpaint');
+            if (maskAppliedBadge && mode !== 'inpaint') {
+                maskAppliedBadge.classList.add('d-none');
+                currentMaskBase64 = null;
+            }
+            // Show upscale info hint
+            const upscaleInfo = document.getElementById('upscaleInfo');
+            if (upscaleInfo) upscaleInfo.classList.toggle('d-none', mode !== 'upscale');
+
+            // Upscale mode: resolution is determined by engine (2x source),
+            // hide the resolution controls since they are not used.
+            const resSection = resolutionPreset ? resolutionPreset.closest('.mb-2') : null;
+            if (resSection) resSection.classList.toggle('d-none', mode === 'upscale');
+            if (customResolutionRow) {
+                if (mode === 'upscale') customResolutionRow.classList.add('d-none');
+                else _syncPresetFromInputs();
+            }
+        }
+
+        modeRadios.forEach(radio => {
+            radio.addEventListener('change', updateModeUI);
+        });
+
+        if (strengthInput && strengthValEl) {
+            strengthInput.addEventListener('input', () => {
+                strengthValEl.textContent = parseFloat(strengthInput.value).toFixed(2);
+            });
+        }
+
+        // Init image upload via click
+        if (initImageDropZone && initImageInput) {
+            initImageDropZone.addEventListener('click', (e) => {
+                if (!e.target.closest('button')) initImageInput.click();
+            });
+
+            initImageInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) loadInitImageFromFile(file);
+            });
+
+            // Drag & drop
+            initImageDropZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                initImageDropZone.classList.add('border-primary');
+            });
+            initImageDropZone.addEventListener('dragleave', () => {
+                initImageDropZone.classList.remove('border-primary');
+            });
+            initImageDropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                initImageDropZone.classList.remove('border-primary');
+                const file = e.dataTransfer.files[0];
+                if (file && file.type.startsWith('image/')) loadInitImageFromFile(file);
+            });
+        }
+
+        function loadInitImageFromFile(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const dataUrl = e.target.result;
+                // Extract base64 data (remove data:image/...;base64, prefix)
+                currentInitImageBase64 = dataUrl.split(',')[1];
+                currentInitImageRef = null;
+                currentParentId = null;
+                showInitImagePreview(dataUrl);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function showInitImagePreview(src) {
+            if (initImagePreview) {
+                initImagePreview.src = src;
+                initImagePreview.classList.remove('d-none');
+                // Adapt width/height to match source image aspect ratio
+                initImagePreview.onload = () => {
+                    const natW = initImagePreview.naturalWidth;
+                    const natH = initImagePreview.naturalHeight;
+                    if (natW && natH) {
+                        const currentH = parseInt(heightInput.value) || 720;
+                        // Keep current height, compute width from aspect ratio, round to 16
+                        let newW = Math.round((currentH * natW / natH) / 16) * 16;
+                        if (newW < 16) newW = 16;
+                        widthInput.value = newW;
+                        widthInput.dispatchEvent(new Event('change'));
+                    }
+                };
+            }
+            if (initImagePlaceholder) initImagePlaceholder.classList.add('d-none');
+            if (clearInitImageBtn) clearInitImageBtn.classList.remove('d-none');
+            if (paintMaskBtn && getSelectedMode() === 'inpaint') paintMaskBtn.classList.remove('d-none');
+        }
+
+        function clearInitImage() {
+            currentInitImageBase64 = null;
+            currentInitImageRef = null;
+            currentParentId = null;
+            currentMaskBase64 = null;
+            if (initImagePreview) {
+                initImagePreview.src = '';
+                initImagePreview.classList.add('d-none');
+            }
+            if (initImagePlaceholder) initImagePlaceholder.classList.remove('d-none');
+            if (clearInitImageBtn) clearInitImageBtn.classList.add('d-none');
+            if (paintMaskBtn) paintMaskBtn.classList.add('d-none');
+            if (maskAppliedBadge) maskAppliedBadge.classList.add('d-none');
+            if (initImageInput) initImageInput.value = '';
+        }
+
+        if (clearInitImageBtn) clearInitImageBtn.addEventListener('click', clearInitImage);
+
+        // Paint Mask button -> open inpaint modal
+        if (paintMaskBtn) {
+            paintMaskBtn.addEventListener('click', () => {
+                const imgSrc = initImagePreview ? initImagePreview.src : null;
+                if (!imgSrc) return;
+
+                const inpaintModalEl = document.getElementById('inpaintModal');
+                if (!inpaintModalEl) return;
+
+                const modal = new bootstrap.Modal(inpaintModalEl);
+
+                // Initialize mask editor when modal opens
+                inpaintModalEl.addEventListener('shown.bs.modal', function onShown() {
+                    inpaintModalEl.removeEventListener('shown.bs.modal', onShown);
+                    const canvas = document.getElementById('inpaintCanvas');
+                    if (canvas && window.MaskEditor) {
+                        const img = new Image();
+                        img.crossOrigin = 'anonymous';
+                        img.onload = () => {
+                            if (maskEditorInstance) maskEditorInstance.destroy();
+                            maskEditorInstance = new window.MaskEditor(canvas, img);
+                        };
+                        img.src = imgSrc;
+                    }
+                });
+
+                modal.show();
+            });
+        }
+
+        // Brush/Eraser tool buttons
+        const brushToolBtn = document.getElementById('brushToolBtn');
+        const eraserToolBtn = document.getElementById('eraserToolBtn');
+        if (brushToolBtn) brushToolBtn.addEventListener('click', () => {
+            if (maskEditorInstance) maskEditorInstance.setTool('brush');
+            brushToolBtn.classList.add('active');
+            if (eraserToolBtn) eraserToolBtn.classList.remove('active');
+        });
+        if (eraserToolBtn) eraserToolBtn.addEventListener('click', () => {
+            if (maskEditorInstance) maskEditorInstance.setTool('eraser');
+            eraserToolBtn.classList.add('active');
+            if (brushToolBtn) brushToolBtn.classList.remove('active');
+        });
+
+        // Brush size
+        const brushSizeInput = document.getElementById('brushSize');
+        const brushSizeVal = document.getElementById('brushSizeVal');
+        if (brushSizeInput) {
+            brushSizeInput.addEventListener('input', () => {
+                const size = parseInt(brushSizeInput.value);
+                if (brushSizeVal) brushSizeVal.textContent = size;
+                if (maskEditorInstance) maskEditorInstance.setBrushSize(size);
+            });
+        }
+
+        // Clear mask
+        const clearMaskBtn = document.getElementById('clearMaskBtn');
+        if (clearMaskBtn) clearMaskBtn.addEventListener('click', () => {
+            if (maskEditorInstance) maskEditorInstance.clearMask();
+        });
+
+        // Apply mask
+        const applyMaskBtn = document.getElementById('applyMaskBtn');
+        if (applyMaskBtn) {
+            applyMaskBtn.addEventListener('click', () => {
+                if (maskEditorInstance) {
+                    currentMaskBase64 = maskEditorInstance.getMaskBase64();
+                    if (maskAppliedBadge) maskAppliedBadge.classList.remove('d-none');
+                }
+                const inpaintModalEl = document.getElementById('inpaintModal');
+                if (inpaintModalEl) bootstrap.Modal.getInstance(inpaintModalEl)?.hide();
+            });
+        }
+
+        // Edit button in preview area
+        if (editBtn) {
+            editBtn.addEventListener('click', () => {
+                if (!currentImageFilename) return;
+                // Enter img2img mode with current preview image
+                const modeRadio = document.getElementById('modeImg2Img');
+                if (modeRadio) {
+                    modeRadio.checked = true;
+                    updateModeUI();
+                }
+                currentInitImageRef = currentImageFilename;
+                currentInitImageBase64 = null;
+                currentParentId = null; // Will be set from last generation's ID
+                showInitImagePreview(`/outputs/${currentImageFilename}`);
+            });
+        }
+
+        /**
+         * Enter edit mode from a history item.
+         * Loads the history item's settings and sets up img2img mode.
+         */
+        function enterEditMode(item) {
+            loadFromHistory(item);
+            // Switch to img2img mode
+            const modeRadio = document.getElementById('modeImg2Img');
+            if (modeRadio) {
+                modeRadio.checked = true;
+                updateModeUI();
+            }
+            currentInitImageRef = item.filename;
+            currentInitImageBase64 = null;
+            currentParentId = item.id;
+            showInitImagePreview(`/outputs/${item.filename}`);
+
+            // Scroll to controls
+            const controlsCol = document.querySelector('.controls-col');
+            if (controlsCol) controlsCol.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        /**
+         * Load a history item into inpaint mode.
+         * Sets the init image and switches to inpaint so the user can paint a mask.
+         * @param {Object} item - History item with filename, id, etc.
+         */
+        function enterInpaintMode(item) {
+            loadFromHistory(item);
+            const modeRadio = document.getElementById('modeInpaint');
+            if (modeRadio) {
+                modeRadio.checked = true;
+                updateModeUI();
+            }
+            currentInitImageRef = item.filename;
+            currentInitImageBase64 = null;
+            currentParentId = item.id;
+            currentMaskBase64 = null;
+            showInitImagePreview(`/outputs/${item.filename}`);
+
+            const controlsCol = document.querySelector('.controls-col');
+            if (controlsCol) controlsCol.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        /**
+         * Load a history item into upscale mode.
+         * Sets the init image and switches to upscale mode.
+         * @param {Object} item - History item with filename, id, etc.
+         */
+        function enterUpscaleMode(item) {
+            loadFromHistory(item);
+            const modeRadio = document.getElementById('modeUpscale');
+            if (modeRadio) {
+                modeRadio.checked = true;
+                updateModeUI();
+            }
+            currentInitImageRef = item.filename;
+            currentInitImageBase64 = null;
+            currentParentId = item.id;
+            showInitImagePreview(`/outputs/${item.filename}`);
+
+            const controlsCol = document.querySelector('.controls-col');
+            if (controlsCol) controlsCol.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
         if (form) {
                 form.addEventListener('submit', async (e) => {
                     e.preventDefault();
@@ -2286,15 +2649,45 @@ async function deleteHistoryItem(itemId) {
                     if (timerEl) timerEl.textContent = formatValueWithOneDecimal(elapsed) + 's';
                 }, 100);
 
+                const selectedMode = getSelectedMode();
+                // Resolve width/height from preset dropdown or custom inputs
+                let _genW = parseInt(document.getElementById('width').value);
+                let _genH = parseInt(document.getElementById('height').value);
+                const _preset = document.getElementById('resolutionPreset');
+                if (_preset && _preset.value !== 'custom') {
+                    const _parts = _preset.value.split('x').map(Number);
+                    if (_parts.length === 2 && _parts[0] > 0 && _parts[1] > 0) {
+                        _genW = _parts[0];
+                        _genH = _parts[1];
+                    }
+                }
+
                 const payload = {
                     prompt: document.getElementById('prompt').value,
                     steps: parseInt(document.getElementById('steps').value),
-                    width: parseInt(document.getElementById('width').value),
-                    height: parseInt(document.getElementById('height').value),
+                    width: _genW,
+                    height: _genH,
                     seed: seedVal,
                     precision: currentPrecisionValue,
-                    loras: activeLoras.map(l => ({ filename: l.filename, strength: parseFloat(l.strength) }))
+                    loras: activeLoras.map(l => ({ filename: l.filename, strength: parseFloat(l.strength) })),
+                    mode: selectedMode,
+                    strength: (selectedMode === 'img2img' || selectedMode === 'inpaint') ? parseFloat(document.getElementById('strength').value) : 0.75,
                 };
+
+                // Add init_image for img2img/inpaint/upscale
+                if (selectedMode === 'img2img' || selectedMode === 'inpaint' || selectedMode === 'upscale') {
+                    if (currentInitImageRef) {
+                        payload.init_image = `ref:${currentInitImageRef}`;
+                    } else if (currentInitImageBase64) {
+                        payload.init_image = currentInitImageBase64;
+                    }
+                    if (currentParentId) payload.parent_id = currentParentId;
+                }
+
+                // Add mask for inpainting
+                if (selectedMode === 'inpaint' && currentMaskBase64) {
+                    payload.mask_image = currentMaskBase64;
+                }
 
                 try {
                     const response = await fetch('/generate', {

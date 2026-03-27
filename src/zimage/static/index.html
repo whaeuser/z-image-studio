@@ -160,12 +160,72 @@
                     <div class="card-body">
                         <h5 class="card-title mb-3" data-i18n="settings_title">Settings</h5>
                         <form id="generateForm">
+                            <!-- Mode Selector -->
+                            <div class="mb-3">
+                                <label class="form-label fw-bold" data-i18n="mode_label">Mode</label>
+                                <div class="btn-group w-100" role="group" aria-label="Generation mode">
+                                    <input type="radio" class="btn-check" name="genMode" id="modeTxt2Img" value="txt2img" checked>
+                                    <label class="btn btn-outline-primary btn-sm" for="modeTxt2Img" data-i18n="mode_txt2img">Text to Image</label>
+                                    <input type="radio" class="btn-check" name="genMode" id="modeImg2Img" value="img2img">
+                                    <label class="btn btn-outline-primary btn-sm" for="modeImg2Img" data-i18n="mode_img2img">Image to Image</label>
+                                    <input type="radio" class="btn-check" name="genMode" id="modeInpaint" value="inpaint">
+                                    <label class="btn btn-outline-primary btn-sm" for="modeInpaint" data-i18n="mode_inpaint">Inpainting</label>
+                                    <input type="radio" class="btn-check" name="genMode" id="modeUpscale" value="upscale">
+                                    <label class="btn btn-outline-primary btn-sm" for="modeUpscale" data-i18n="mode_upscale">Upscale</label>
+                                </div>
+                            </div>
+
+                            <!-- Upscale info (visible for upscale mode) -->
+                            <div id="upscaleInfo" class="alert alert-info small py-2 d-none" data-i18n="upscale_info">
+                                Progressive 4-stage generation for higher quality and detail
+                            </div>
+
+                            <!-- Init Image Upload (visible for img2img/inpaint) -->
+                            <div id="initImageSection" class="mb-3 d-none">
+                                <label class="form-label fw-bold" data-i18n="init_image_label">Source Image</label>
+                                <div id="initImageDropZone" class="init-image-drop-zone border rounded p-3 text-center position-relative">
+                                    <div id="initImagePlaceholder">
+                                        <i class="bi bi-image text-muted" style="font-size: 2rem;"></i>
+                                        <p class="mb-0 small text-muted" data-i18n="init_image_placeholder">Drop image here or click to upload</p>
+                                    </div>
+                                    <img id="initImagePreview" class="img-fluid d-none" style="max-height: 200px; border-radius: 4px;">
+                                    <input type="file" id="initImageInput" accept="image/*" style="display: none;">
+                                </div>
+                                <div class="d-flex gap-2 mt-1">
+                                    <button type="button" class="btn btn-sm btn-link text-danger d-none" id="clearInitImageBtn" data-i18n="clear_init_image_btn">Clear</button>
+                                    <button type="button" class="btn btn-sm btn-link text-primary d-none" id="paintMaskBtn" data-i18n="paint_mask_btn">
+                                        <i class="bi bi-brush me-1"></i>Paint Mask
+                                    </button>
+                                    <span class="badge bg-success align-self-center d-none" id="maskAppliedBadge" data-i18n="mask_applied">Mask applied</span>
+                                </div>
+                            </div>
+
+                            <!-- Strength Slider (visible for img2img/inpaint) -->
+                            <div id="strengthSection" class="mb-2 d-none">
+                                <label for="strength" class="form-label">
+                                    <span data-i18n="strength_label">Strength</span>: <span id="strengthVal">0.75</span>
+                                    <span class="d-inline-block ms-2 tooltip-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" data-i18n-title="strength_tooltip">
+                                        <i class="bi bi-question-circle"></i>
+                                    </span>
+                                </label>
+                                <input type="range" class="form-range" id="strength" min="0.0" max="1.0" step="0.05" value="0.75">
+                            </div>
+
                             <div class="mb-2">
                                 <label for="prompt" class="form-label fw-bold" data-i18n="prompt_label">Prompt</label>
                                 <textarea class="form-control" id="prompt" rows="6" placeholder="Describe your image..." data-i18n-placeholder="prompt_placeholder" data-i18n-value="default_prompt" required></textarea>
                             </div>
 
-                            <div class="row mb-3">
+                            <div class="mb-2">
+                                <label class="form-label" data-i18n="resolution_label">Resolution</label>
+                                <select class="form-select form-select-sm" id="resolutionPreset" onchange="window._onResolutionChange && window._onResolutionChange(this.value)">
+                                    <option value="1024x768">1024 × 768</option>
+                                    <option value="1280x720" selected>1280 × 720 (HD)</option>
+                                    <option value="1600x1200">1600 × 1200</option>
+                                    <option value="custom" data-i18n="resolution_custom">Custom</option>
+                                </select>
+                            </div>
+                            <div class="row mb-3 d-none" id="customResolutionRow">
                                 <div class="col">
                                     <label for="width" class="form-label" data-i18n="width_label">Width</label>
                                     <input type="number" class="form-control" id="width" value="1280" step="16" min="16">
@@ -331,6 +391,10 @@
                                     <i class="bi bi-download"></i>
                                     <span class="ms-1 d-none d-sm-inline" data-i18n="download_btn">Download</span>
                                 </a>
+                                <button id="editBtn" class="btn btn-outline-secondary flex-fill" title="Edit" data-i18n-title="edit_btn" data-bs-toggle="tooltip" data-bs-placement="top" disabled>
+                                    <i class="bi bi-pencil-square"></i>
+                                    <span class="ms-1 d-none d-sm-inline" data-i18n="edit_btn">Edit</span>
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -465,6 +529,45 @@
         </div>
     </div>
 
+    <!-- Inpainting Mask Editor Modal -->
+    <div class="modal fade" id="inpaintModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" data-i18n="inpaint_title">Paint Mask</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex gap-2 mb-2 flex-wrap">
+                        <div class="btn-group" role="group">
+                            <button type="button" class="btn btn-sm btn-outline-primary active" id="brushToolBtn">
+                                <i class="bi bi-brush"></i> <span data-i18n="brush_tool">Brush</span>
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="eraserToolBtn">
+                                <i class="bi bi-eraser"></i> <span data-i18n="eraser_tool">Eraser</span>
+                            </button>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <label class="small mb-0" data-i18n="brush_size">Size:</label>
+                            <input type="range" id="brushSize" min="5" max="100" value="30" style="width: 120px;">
+                            <span id="brushSizeVal" class="small">30</span>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-danger" id="clearMaskBtn">
+                            <i class="bi bi-trash"></i> <span data-i18n="clear_mask_btn">Clear</span>
+                        </button>
+                    </div>
+                    <div id="inpaintCanvasContainer" class="text-center" style="overflow: auto;">
+                        <canvas id="inpaintCanvas" style="cursor: crosshair; max-width: 100%;"></canvas>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" data-i18n="cancel_btn">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="applyMaskBtn" data-i18n="apply_mask_btn">Apply Mask</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Container for notifications -->
     <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
         <div id="shareToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
@@ -479,6 +582,7 @@
     <script src="js/i18n-loader.js"></script>
     <script src="js/utils.js"></script>
     <script src="js/theme.js"></script>
+    <script src="js/mask-editor.js"></script>
     <script type="module" src="js/main.js"></script>
 
 </body>

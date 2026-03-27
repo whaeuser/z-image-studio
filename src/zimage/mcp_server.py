@@ -96,6 +96,10 @@ async def _generate_impl(
     precision: str,
     transport: Literal["stdio", "sse", "streamable_http"],
     ctx: Optional[Context],
+    mode: str = "txt2img",
+    init_image: str | None = None,
+    mask_image: str | None = None,
+    strength: float = 0.75,
 ) -> list[types.TextContent | types.ResourceLink | types.ImageContent]:
     """Internal implementation for generate with explicit transport selection."""
     logger.info(f"Received generate request: {prompt}")
@@ -145,24 +149,93 @@ async def _generate_impl(
 
             await send_progress(20, "Starting generation...")
             logger.info(
-                "DEBUG: steps=%s, width=%s, height=%s, guidance_scale=0.0, seed=%s, precision=%s",
-                steps,
-                width,
-                height,
-                seed,
-                precision,
+                "DEBUG: steps=%s, width=%s, height=%s, guidance_scale=0.0, seed=%s, precision=%s, mode=%s",
+                steps, width, height, seed, precision, mode,
             )
 
-            # Run generation with progress updates
-            image = await run_in_worker(
-                generate_image,
-                prompt=prompt,
-                steps=steps,
-                width=width,
-                height=height,
-                seed=seed,
-                precision=precision,
-            )
+            if mode == "upscale":
+                # Progressive 4-stage upscale generation
+                try:
+                    from .engine import upscale_generate as _upscale_generate
+                except ImportError:
+                    from engine import upscale_generate as _upscale_generate
+
+                upscale_init_pil = None
+                if init_image:
+                    from PIL import Image as PILImage
+                    from io import BytesIO
+                    if init_image.startswith("ref:"):
+                        ref_filename = init_image[4:]
+                        try:
+                            from .paths import get_outputs_dir
+                        except ImportError:
+                            from paths import get_outputs_dir
+                        init_path = Path(get_outputs_dir()) / ref_filename
+                        upscale_init_pil = PILImage.open(init_path).convert("RGB")
+                    else:
+                        upscale_init_pil = PILImage.open(BytesIO(base64.b64decode(init_image))).convert("RGB")
+
+                image = await run_in_worker(
+                    _upscale_generate,
+                    prompt=prompt,
+                    steps=steps,
+                    width=width,
+                    height=height,
+                    seed=seed,
+                    precision=precision,
+                    init_image=upscale_init_pil,
+                )
+            elif mode in ("img2img", "inpaint") and init_image:
+                # Import edit_image lazily
+                try:
+                    from .engine import edit_image as _edit_image
+                except ImportError:
+                    from engine import edit_image as _edit_image
+
+                from PIL import Image as PILImage
+                from io import BytesIO
+
+                # Decode init_image
+                try:
+                    from .paths import get_outputs_dir
+                except ImportError:
+                    from paths import get_outputs_dir
+
+                if init_image.startswith("ref:"):
+                    ref_filename = init_image[4:]
+                    init_path = Path(get_outputs_dir()) / ref_filename
+                    init_pil = PILImage.open(init_path).convert("RGB")
+                else:
+                    init_pil = PILImage.open(BytesIO(base64.b64decode(init_image))).convert("RGB")
+
+                # Decode mask_image
+                mask_pil = None
+                if mode == "inpaint" and mask_image:
+                    mask_pil = PILImage.open(BytesIO(base64.b64decode(mask_image))).convert("L")
+
+                image = await run_in_worker(
+                    _edit_image,
+                    prompt=prompt,
+                    init_image=init_pil,
+                    mask_image=mask_pil,
+                    strength=strength,
+                    steps=steps,
+                    width=width,
+                    height=height,
+                    seed=seed,
+                    precision=precision,
+                )
+            else:
+                # Standard text-to-image generation
+                image = await run_in_worker(
+                    generate_image,
+                    prompt=prompt,
+                    steps=steps,
+                    width=width,
+                    height=height,
+                    seed=seed,
+                    precision=precision,
+                )
 
             await send_progress(90, "Saving image...")
         except Exception as e:
@@ -193,6 +266,8 @@ async def _generate_impl(
             cfg_scale=0.0,
             seed=seed,
             precision=precision,
+            mode=mode,
+            strength=strength if mode in ("img2img", "inpaint") else None,
         )
 
         await send_progress(100, "Complete!")
@@ -456,28 +531,27 @@ async def generate(
     height: int = 720,
     seed: int | None = None,
     precision: str = "q8",
+    mode: str = "txt2img",
+    init_image: str | None = None,
+    mask_image: str | None = None,
+    strength: float = 0.75,
     ctx: Optional[Context] = None
 ) -> list[types.TextContent | types.ResourceLink | types.ImageContent]:
     """
-    Generate an image from a text prompt.
+    Generate or edit an image.
 
-    Returns a consistent content array for both stdio and SSE transports:
-    1. TextContent: Enhanced metadata including generation info and file details
-    2. ResourceLink: Main image file reference with context-appropriate URI:
-       - SSE: Absolute URL built from request context (X-Forwarded-* headers), ZIMAGE_BASE_URL, or relative path
-       - Stdio: file:// URI for local access
-    3. ImageContent: Thumbnail preview (base64 PNG, max 400px)
+    Supports four modes:
+    - txt2img: Generate from text prompt (default)
+    - img2img: Edit an existing image guided by a prompt
+    - inpaint: Regenerate masked areas of an image
+    - upscale: Progressive 4-stage generation for higher quality and detail
 
-    URI Building Priority (SSE):
-    1. Context parameter (ctx.request_context.request) - builds absolute URL from request headers
-    2. ZIMAGE_BASE_URL environment variable - uses configured base URL
-    3. Relative URL - fallback when no other method available
+    For img2img/inpaint, provide init_image as base64-encoded PNG or "ref:<filename>"
+    to reference an existing output. For inpaint, also provide mask_image as base64 PNG
+    (white = areas to regenerate, black = keep).
+    For upscale mode, only prompt and target dimensions are needed.
 
-    File metadata (filename, file_path) is in TextContent to avoid duplication in ResourceLink.
-
-    For long-running operations (high steps/large images), this function will:
-    - Send progress notifications at key milestones via ctx.report_progress()
-    - Handle client disconnections gracefully
+    The strength parameter (0.0-1.0) controls how much the original image is modified.
     """
     transport = _infer_transport(ctx)
     return await _generate_impl(
@@ -489,6 +563,10 @@ async def generate(
         precision=precision,
         transport=transport,
         ctx=ctx,
+        mode=mode,
+        init_image=init_image,
+        mask_image=mask_image,
+        strength=strength,
     )
 
 @mcp.tool()

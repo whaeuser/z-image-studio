@@ -49,6 +49,7 @@ def init_db():
     _migrate_add_precision_column(cursor)
     _migrate_create_generation_loras_table(cursor)
     _normalize_historical_data(cursor)
+    _migrate_add_edit_columns(cursor)
     
     conn.commit()
     conn.close()
@@ -79,3 +80,22 @@ def _normalize_historical_data(cursor: sqlite3.Cursor):
     """Update NULL values in historical records with defaults."""
     cursor.execute("UPDATE generations SET precision = 'full' WHERE precision IS NULL")
     cursor.execute("UPDATE generations SET model = 'Tongyi-MAI/Z-Image-Turbo' WHERE model IS NULL")
+
+
+def _migrate_add_edit_columns(cursor: sqlite3.Cursor):
+    """Add columns for image editing lineage tracking (img2img/inpainting)."""
+    cursor.execute("PRAGMA table_info(generations)")
+    columns = [info[1] for info in cursor.fetchall()]
+
+    if "parent_id" not in columns:
+        cursor.execute(
+            "ALTER TABLE generations ADD COLUMN parent_id INTEGER REFERENCES generations(id) ON DELETE SET NULL"
+        )
+    if "mode" not in columns:
+        cursor.execute(
+            "ALTER TABLE generations ADD COLUMN mode TEXT DEFAULT 'txt2img'"
+        )
+    if "strength" not in columns:
+        cursor.execute(
+            "ALTER TABLE generations ADD COLUMN strength REAL"
+        )

@@ -67,6 +67,9 @@ def record_generation(
     seed: Optional[int],
     cfg_scale: float = 0.0,
     loras: Optional[List[Dict[str, Any]]] = None,
+    parent_id: Optional[int] = None,
+    mode: str = "txt2img",
+    strength: Optional[float] = None,
 ):
     """
     Persist a generation record to the DB. Best-effort with logging.
@@ -87,6 +90,9 @@ def record_generation(
             status="succeeded",
             precision=precision,
             loras=loras,
+            parent_id=parent_id,
+            mode=mode,
+            strength=strength,
         )
     except Exception as e:  # pragma: no cover
         logger.error(f"Failed to record generation to DB: {e}")
