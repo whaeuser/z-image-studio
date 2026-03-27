@@ -40,7 +40,10 @@ This tool is designed to run efficiently on local machines for Windows/Mac/Linux
 *   **Multilanguage Support**: English, Japanese, Chinese Simplified (zh-CN), and Chinese Traditional (zh-TW) are supported.
 *   **History Browser**: Efficiently search and browse your past generations with a paginated history that loads more items as you scroll.
 *   **Hardware-aware Model Recommendation**: The Web UI dynamically presents model precision options based on your system's detected RAM/VRAM, recommending the optimal choice for your hardware. You can also inspect available models and recommendations via the CLI.
-*   **Image Sharing**: The generated image can be downloaded to browser download directory, conveniently shared via OS share protocol, and copied into clipboard. 
+*   **Image Editing**: Edit existing images using img2img (style transfer / variation), inpainting (interactive mask editor to selectively regenerate regions), and upscaling (AI-powered resolution enhancement).
+*   **Mask Editor**: Interactive brush-based mask painter for inpainting — draw directly on the image to define which areas should be regenerated.
+*   **Generation Lineage**: Parent–child relationship tracking between source images and their edits/upscales, visible in the history.
+*   **Image Sharing**: The generated image can be downloaded to browser download directory, conveniently shared via OS share protocol, and copied into clipboard.
 *   **Theme Switch**: Light, dark and auto themes.
 *   **Mobile compatible**: Responsive layout for mobile devices.
 
@@ -286,6 +289,61 @@ The container uses Docker volumes for persistence:
 | `ZIMAGE_BASE_URL` | Auto | Base URL for generated links |
 | `ZIMAGE_DISABLE_MCP` | `0` | Disable MCP endpoints |
 | `ZIMAGE_ENABLE_TORCH_COMPILE` | Auto | Force torch.compile |
+
+## macOS LaunchDaemon (Auto-Start on Boot)
+
+To run Z-Image Studio as a system service on macOS that starts automatically at boot:
+
+1. Create `/Library/LaunchDaemons/com.youruser.z-image-studio.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.youruser.z-image-studio</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/z-image-studio/.venv/bin/zimg</string>
+        <string>serve</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8001</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/z-image-studio</string>
+    <key>UserName</key>
+    <string>youruser</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/youruser/Library/Logs/z-image-studio.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/youruser/Library/Logs/z-image-studio.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/youruser</string>
+    </dict>
+</dict>
+</plist>
+```
+
+2. Load the daemon:
+```bash
+sudo chown root:wheel /Library/LaunchDaemons/com.youruser.z-image-studio.plist
+sudo chmod 644 /Library/LaunchDaemons/com.youruser.z-image-studio.plist
+sudo launchctl load /Library/LaunchDaemons/com.youruser.z-image-studio.plist
+```
+
+**Notes:**
+- Use the `.venv/bin/zimg` binary from the cloned repository, not the global `uv tool` installation.
+- Log output lands in `~/Library/Logs/z-image-studio.{log,err}` (writable by the user).
+- The output directory can be pointed to an external drive via `Z_IMAGE_STUDIO_OUTPUT_DIR` in `~/.z-image-studio/config.json`.
 
 ### Development Mode
 
